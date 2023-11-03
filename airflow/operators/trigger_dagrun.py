@@ -82,6 +82,12 @@ class TriggerDagRunOperator(BaseOperator):
         Dag run conf is immutable and will not be reset on rerun of an existing dag run.
         When reset_dag_run=False and dag run exists, DagRunAlreadyExists will be raised.
         When reset_dag_run=True and dag run exists, existing dag run will be cleared to rerun.
+    :param resume_dag_run: Whether resume existing dag run if already exists.
+        The difference with reset_dag_run is that the triggered dag won't be re-launched
+        if it already exists. It will continue the polling of the triggered DAG until finished.
+        This is useful if the platform crashes for whatever reason in order to finish the running processes.
+        This option can't be activated if reset_dag_run is too.
+        This option can't be activated if trigger_run_id is not provided.
     :param wait_for_completion: Whether or not wait for dag run completion. (default: False)
     :param poke_interval: Poke interval to check dag run status when wait_for_completion=True.
         (default: 60)
@@ -110,6 +116,7 @@ class TriggerDagRunOperator(BaseOperator):
         conf: dict | None = None,
         execution_date: str | datetime.datetime | None = None,
         reset_dag_run: bool = False,
+        resume_dag_run: bool = False,
         wait_for_completion: bool = False,
         poke_interval: int = 60,
         allowed_states: list[str] | None = None,
@@ -122,6 +129,7 @@ class TriggerDagRunOperator(BaseOperator):
         self.trigger_run_id = trigger_run_id
         self.conf = conf
         self.reset_dag_run = reset_dag_run
+        self.resume_dag_run = resume_dag_run
         self.wait_for_completion = wait_for_completion
         self.poke_interval = poke_interval
         if allowed_states:
@@ -133,6 +141,9 @@ class TriggerDagRunOperator(BaseOperator):
         else:
             self.failed_states = [DagRunState.FAILED]
         self._defer = deferrable
+
+        if resume_dag_run and reset_dag_run:
+            raise AirflowException("resume_dag_run and reset_dag_run can't be both activated.")
 
         if execution_date is not None and not isinstance(execution_date, (str, datetime.datetime)):
             raise TypeError(
@@ -157,6 +168,8 @@ class TriggerDagRunOperator(BaseOperator):
         if self.trigger_run_id:
             run_id = self.trigger_run_id
         else:
+            if self.resume_dag_run:
+                raise AirflowException("resume_dag_run needs trigger_run_id to be provided.")
             run_id = DagRun.generate_run_id(DagRunType.MANUAL, parsed_execution_date)
 
         try:
@@ -181,6 +194,10 @@ class TriggerDagRunOperator(BaseOperator):
                 dag_bag = DagBag(dag_folder=dag_model.fileloc, read_dags_from_db=True)
                 dag = dag_bag.get_dag(self.trigger_dag_id)
                 dag.clear(start_date=parsed_execution_date, end_date=parsed_execution_date)
+                dag_run = e.dag_run
+            elif self.resume_dag_run:
+                self.log.info("Detected already running sub-batch %s on %s. Resuming...",
+                              self.trigger_dag_id, parsed_execution_date)
                 dag_run = e.dag_run
             else:
                 raise e
